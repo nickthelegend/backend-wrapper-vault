@@ -140,6 +140,61 @@ app.post("/sign", async (req, res) => {
   }
 });
 
+// 💸 /mock — create, sign, and send a payment txn using Vault
+app.get("/mock", async (req, res) => {
+  try {
+    const senderAddr = "DKD6JIA5CCTKRZJJJ25EO5GT6KMFDZYTCVCAKDEWBZYQOEU6T2UXXTIBAM";
+    const receiverAddr = "DKD6JIA5CCTKRZJJJ25EO5GT6KMFDZYTCVCAKDEWBZYQOEU6T2UXXTIBAM"; // test receiver
+    const userId = "123"; // mock user ID for Vault key: algo-user-123
+
+    // 1️⃣ Get transaction params from network
+    const params = await algodClient.getTransactionParams().do();
+
+    // 2️⃣ Create a simple Payment transaction (1 Algo)
+    const txn = algosdk.makePaymentTxnWithSuggestedParamsFromObject({
+      sender: senderAddr,
+      receiver: receiverAddr,
+      amount: 1_000_000, // microAlgos (1 Algo)
+      note: new Uint8Array(Buffer.from("Vault Mock Payment Test")),
+      suggestedParams: params,
+    });
+
+    // 3️⃣ Get bytes to sign (canonical)
+    const bytesToSign = txn.bytesToSign();
+
+    // 4️⃣ Ask Vault to sign
+    const response = await axios.post(
+      `${VAULT_ADDR}/v1/transit/sign/algo-user-${userId}`,
+      { input: Buffer.from(bytesToSign).toString("base64") },
+      { headers: { "X-Vault-Token": VAULT_TOKEN } }
+    );
+
+    const vaultSig = response.data?.data?.signature;
+    if (!vaultSig) throw new Error("Vault did not return a signature");
+
+    const sigBase64 = vaultSig.split(":").pop();
+    const sigBytes = new Uint8Array(Buffer.from(sigBase64, "base64"));
+
+    // 5️⃣ Attach signature
+    const signedTxnBytes = txn.attachSignature(senderAddr, sigBytes);
+
+    // 6️⃣ Send to network
+    const txnResult = await algodClient.sendRawTransaction(signedTxnBytes).do();
+
+    res.json({
+      success: true,
+      txId: txnResult.txId,
+      signedTxnBase64: Buffer.from(signedTxnBytes).toString("base64"),
+    });
+  } catch (err) {
+    console.error("Mock txn error:", err.response?.data || err.message);
+    res.status(500).json({
+      success: false,
+      error: "Mock transaction failed",
+      details: err.response?.data || err.message,
+    });
+  }
+});
 
 
 // Root endpoint for testing
