@@ -423,6 +423,77 @@ app.get("/mock", async (req, res) => {
 });
 
 
+// Sign and execute transaction endpoint
+app.post("/sign-txn", async (req, res) => {
+  console.log('🚀 /sign-txn endpoint called');
+  try {
+    const { txnBytes, senderAddr, oauthToken } = req.body;
+    console.log('📋 Sign-txn request:', { 
+      txnBytes: txnBytes ? 'PROVIDED' : 'MISSING',
+      senderAddr,
+      oauthToken: oauthToken ? '***PROVIDED***' : 'MISSING'
+    });
+    
+    // Verify user
+    const user = await verifyOAuthToken(oauthToken);
+    if (!user) return res.status(401).json({ error: "Invalid oauth token" });
+
+    const userId = user.uid;
+    console.log('👤 User verified:', userId);
+
+    // Decode transaction bytes to get bytesToSign
+    const txnBytesBuffer = Buffer.from(txnBytes, 'base64');
+    const txnObj = algosdk.decodeUnsignedTransaction(txnBytesBuffer);
+    const bytesToSign = txnObj.bytesToSign();
+    console.log('📝 Bytes to sign length:', bytesToSign.length);
+
+    // Ask Vault to sign
+    console.log('🔐 Calling Vault to sign...');
+    const response = await axios.post(
+      `${VAULT_ADDR}/v1/transit/sign/algo-user-${userId}`,
+      { input: Buffer.from(bytesToSign).toString('base64') },
+      { headers: { "X-Vault-Token": VAULT_ADMIN_TOKEN } }
+    );
+
+    const vaultSig = response.data?.data?.signature;
+    console.log('🔏 Vault signature:', vaultSig);
+    if (!vaultSig) throw new Error("Vault did not return a signature");
+
+    const sigBase64 = vaultSig.split(":").pop();
+    const sigBytes = new Uint8Array(Buffer.from(sigBase64, "base64"));
+    console.log('📋 Signature bytes length:', sigBytes.length);
+
+    // Attach signature and create signed transaction
+    const signedTxnBytes = txnObj.attachSignature(senderAddr, sigBytes);
+    console.log('✅ Transaction signed');
+
+    // Execute transaction on Algorand network
+    console.log('📤 Submitting to Algorand network...');
+    const txnResult = await algodClient.sendRawTransaction(signedTxnBytes).do();
+    console.log('✅ Transaction executed:', txnResult);
+
+    const result = {
+      success: true,
+      txId: txnResult.txId,
+      signature: Buffer.from(sigBytes).toString("base64"),
+      signedTxnBytes: Buffer.from(signedTxnBytes).toString("base64")
+    };
+    console.log('✅ /sign-txn success response:', result);
+    res.json(result);
+  } catch (err) {
+    console.error("❌ Sign-txn error:", {
+      message: err.message,
+      status: err.response?.status,
+      data: err.response?.data,
+      stack: err.stack
+    });
+    res.status(500).json({
+      success: false,
+      error: "Transaction signing/execution failed",
+      details: err.response?.data || err.message,
+    });
+  }
+});
 // Get wallet address endpoint
 app.get("/get/:id", async (req, res) => {
   console.log('🚀 /get/:id endpoint called');
@@ -480,6 +551,7 @@ app.listen(3000, () => {
   console.log('📋 Available endpoints:');
   console.log('  POST /create - Create user key and policy');
   console.log('  POST /sign - Sign transaction');
+  console.log('  POST /sign-txn - Sign and execute transaction');
   console.log('  GET /get/:id - Get wallet address');
   console.log('  GET /mock - Mock transaction test');
   console.log('  GET / - Health check');
