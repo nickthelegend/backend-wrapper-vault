@@ -35,7 +35,7 @@ app.use((req, res, next) => {
 
 // Simple JSON middleware without body-parser conflicts
 app.use((req, res, next) => {
-  console.log(`📥 ${req.method} ${req.url}`);
+  if (req.url === '/sign-txn') console.log(`📥 ${req.method} ${req.url}`);
   if (req.method === 'POST') {
     let data = '';
     req.on('data', chunk => {
@@ -44,10 +44,10 @@ app.use((req, res, next) => {
     req.on('end', () => {
       try {
         req.body = JSON.parse(data || '{}');
-        console.log('📦 Request body:', JSON.stringify(req.body, null, 2));
+        if (req.url === '/sign-txn') console.log('📦 Request body:', JSON.stringify(req.body, null, 2));
         next();
       } catch (err) {
-        console.error('❌ Invalid JSON:', err.message);
+        if (req.url === '/sign-txn') console.error('❌ Invalid JSON:', err.message);
         res.status(400).json({ error: 'Invalid JSON' });
       }
     });
@@ -59,17 +59,17 @@ app.use((req, res, next) => {
 const EPHEMERAL_TTL = process.env.EPHEMERAL_TTL || "30m"; // short-lived token TTL
 
 // Google OAuth token verification
-async function verifyOAuthToken(oauthToken) {
-  console.log('🔐 Verifying OAuth token:', oauthToken ? oauthToken.substring(0, 20) + '...' : 'NONE');
+async function verifyOAuthToken(oauthToken, showLogs = false) {
+  if (showLogs) console.log('🔐 Verifying OAuth token:', oauthToken ? oauthToken.substring(0, 20) + '...' : 'NONE');
   
   if (!oauthToken) {
-    console.log('❌ No OAuth token provided');
+    if (showLogs) console.log('❌ No OAuth token provided');
     return null;
   }
   
   // Mock token for testing
   if (oauthToken === "mockToken") {
-    console.log('✅ Mock token verified for user 123');
+    if (showLogs) console.log('✅ Mock token verified for user 123');
     return { uid: "123" };
   }
   
@@ -78,7 +78,7 @@ async function verifyOAuthToken(oauthToken) {
     const response = await axios.get(`https://www.googleapis.com/oauth2/v1/tokeninfo?access_token=${oauthToken}`);
     const tokenInfo = response.data;
     
-    console.log('📋 Google token info:', {
+    if (showLogs) console.log('📋 Google token info:', {
       audience: tokenInfo.audience,
       user_id: tokenInfo.user_id,
       email: tokenInfo.email,
@@ -87,12 +87,12 @@ async function verifyOAuthToken(oauthToken) {
     
     // Verify the token is for our app
     if (tokenInfo.audience !== GOOGLE_CLIENT_ID) {
-      console.log('❌ Token audience mismatch');
+      if (showLogs) console.log('❌ Token audience mismatch');
       return null;
     }
     
     // Return user info with Google user ID as uid
-    console.log('✅ Google token verified for user:', tokenInfo.user_id);
+    if (showLogs) console.log('✅ Google token verified for user:', tokenInfo.user_id);
     return { 
       uid: tokenInfo.user_id,
       email: tokenInfo.email,
@@ -100,7 +100,7 @@ async function verifyOAuthToken(oauthToken) {
     };
     
   } catch (err) {
-    console.log('❌ Google token verification failed:', err.response?.data || err.message);
+    if (showLogs) console.log('❌ Google token verification failed:', err.response?.data || err.message);
     return null;
   }
 }
@@ -111,10 +111,8 @@ function vaultHeaders() {
 
 // Create per-user transit key + policy + ephemeral token
 app.post("/create", async (req, res) => {
-  console.log('🚀 /create endpoint called');
   try {
     const { oauthToken } = req.body;
-    console.log('📋 Create request data:', { oauthToken: oauthToken ? '***PROVIDED***' : 'MISSING' });
     
     if (!oauthToken) return res.status(400).json({ error: "Missing oauthToken" });
 
@@ -125,26 +123,19 @@ app.post("/create", async (req, res) => {
     const uid = user.uid;
     const keyName = `algo-user-${uid}`;
     const policyName = `sign-user-${uid}`;
-    
-    console.log('👤 User verified:', { uid, keyName, policyName });
 
     // 2) Create transit key (ed25519). If exists, Vault returns 204 or 400; handle idempotency.
-    console.log('🔑 Creating transit key:', keyName);
     try {
       const keyUrl = `${VAULT_ADDR}/v1/transit/keys/${encodeURIComponent(keyName)}`;
       const keyPayload = { type: "ed25519" };
-      console.log('📡 Key creation request:', { url: keyUrl, payload: keyPayload });
       
       const keyResp = await axios.post(keyUrl, keyPayload, { headers: vaultHeaders(), timeout: 10000 });
-      console.log('✅ Key created successfully:', keyResp.status);
     } catch (err) {
       // If key already exists, Vault may return 400; ignore that and continue.
       const status = err.response?.status;
       const data = err.response?.data;
-      console.log('⚠️ Key creation error:', { status, data: data || err.message });
       if (status && (status === 400 || status === 409)) {
         // key exists or conflict — continue
-        console.log(`✅ Key ${keyName} already exists, continuing...`);
       } else {
         throw err;
       }
@@ -163,40 +154,28 @@ path "transit/keys/${keyName}" {
 
     // Write policy via sys/policies/acl/<policyName>
     // (Vault HTTP API: PUT /v1/sys/policies/acl/<name> { "policy": "<hcl>" })
-    console.log('📜 Creating policy:', policyName);
-    console.log('📝 Policy HCL:', policyHCL);
-    
     const policyUrl = `${VAULT_ADDR}/v1/sys/policies/acl/${encodeURIComponent(policyName)}`;
     const policyPayload = { policy: policyHCL };
-    console.log('📡 Policy creation request:', { url: policyUrl });
     
     const policyResp = await axios.put(policyUrl, policyPayload, { headers: vaultHeaders(), timeout: 10000 });
-    console.log('✅ Policy created:', policyResp.status);
 
     // 4) Create ephemeral token scoped to that policy
-    console.log('🎫 Creating ephemeral token for policy:', policyName);
     const tokenUrl = `${VAULT_ADDR}/v1/auth/token/create`;
     const tokenPayload = { policies: [policyName], ttl: EPHEMERAL_TTL };
-    console.log('📡 Token creation request:', { url: tokenUrl, payload: tokenPayload });
     
     const tokenResp = await axios.post(tokenUrl, tokenPayload, { headers: vaultHeaders(), timeout: 10000 });
-    console.log('📋 Token response:', tokenResp.data);
     
     const clientToken = tokenResp?.data?.auth?.client_token;
-    console.log('🎫 Client token:', clientToken ? '***CREATED***' : 'NOT CREATED');
 
     // 5) Read key metadata (public key info) — read transit/keys/<keyName>
-    console.log('📖 Reading key metadata for:', keyName);
     let keyInfo = null;
     try {
       const keyInfoUrl = `${VAULT_ADDR}/v1/transit/keys/${encodeURIComponent(keyName)}`;
-      console.log('📡 Key info request:', keyInfoUrl);
       
       const keyInfoResp = await axios.get(keyInfoUrl, { headers: vaultHeaders(), timeout: 10000 });
       keyInfo = keyInfoResp.data?.data || null;
-      console.log('📋 Key info retrieved:', keyInfo ? 'SUCCESS' : 'NO DATA');
     } catch (err) {
-      console.warn("⚠️ Could not read key metadata:", err.response?.data || err.message);
+      // Ignore key metadata errors
     }
 
     // 6) Return essential info (do NOT return admin token)
@@ -210,15 +189,8 @@ path "transit/keys/${keyName}" {
       note:
         "Treat ephemeralToken as a secret. TTL is short. Prefer exchanging via secure channel or keep it server-side."
     };
-    console.log('✅ /create success response:', { ...response, ephemeralToken: response.ephemeralToken ? '***HIDDEN***' : 'NONE' });
     return res.json(response);
   } catch (err) {
-    console.error("❌ /create error:", {
-      message: err.message,
-      status: err.response?.status,
-      data: err.response?.data,
-      stack: err.stack
-    });
     return res.status(500).json({ error: "create_failed", details: err.response?.data || err.message });
   }
 });
@@ -235,83 +207,60 @@ const algodClient = new algosdk.Algodv2('', 'https://testnet-api.algonode.cloud'
 // 2️⃣ Sign endpoint (fixed)
 // improved /sign handler with algosdk export fallbacks
 app.post("/sign", async (req, res) => {
-  console.log('🚀 /sign endpoint called');
   const { txn, oauthToken } = req.body;
-  console.log('📋 Sign request data:', { 
-    txn: txn ? `${txn.substring(0, 50)}...` : 'MISSING',
-    oauthToken: oauthToken ? '***PROVIDED***' : 'MISSING'
-  });
   
   const user = await verifyOAuthToken(oauthToken);
   if (!user) return res.status(401).json({ error: "Unauthorized" });
 
   try {
     // decode input (same assumption as before)
-    console.log('🔓 Decoding transaction...');
     const decoded = Buffer.from(txn, "base64").toString();
-    console.log('📋 Decoded transaction:', decoded.substring(0, 200) + '...');
     const txnObj = JSON.parse(decoded).txn;
-    console.log('📦 Transaction object:', JSON.stringify(txnObj, null, 2));
 
     // ---- create a Transaction instance (try several fallbacks) ----
-    console.log('🔨 Creating transaction instance...');
     let txnInstance = null;
 
     // 1) prefer direct top-level helper if present
     if (typeof algosdk.instantiateTxnIfNeeded === "function") {
-      console.log('✅ Using algosdk.instantiateTxnIfNeeded');
       txnInstance = algosdk.instantiateTxnIfNeeded(txnObj);
     }
     // 2) try namespaced module (some builds export under .transaction or .txnBuilder)
     else if (algosdk.transaction && typeof algosdk.transaction.instantiateTxnIfNeeded === "function") {
-      console.log('✅ Using algosdk.transaction.instantiateTxnIfNeeded');
       txnInstance = algosdk.transaction.instantiateTxnIfNeeded(txnObj);
     }
     else if (algosdk.txnBuilder && typeof algosdk.txnBuilder.instantiateTxnIfNeeded === "function") {
-      console.log('✅ Using algosdk.txnBuilder.instantiateTxnIfNeeded');
       txnInstance = algosdk.txnBuilder.instantiateTxnIfNeeded(txnObj);
     }
     // 3) try Transaction.from_obj_for_encoding (constructor factory)
     else if (algosdk.Transaction && typeof algosdk.Transaction.from_obj_for_encoding === "function") {
-      console.log('✅ Using algosdk.Transaction.from_obj_for_encoding');
       txnInstance = algosdk.Transaction.from_obj_for_encoding(txnObj);
     }
     // 4) lastly, try the constructor (works for many versions)
     else if (typeof algosdk.Transaction === "function") {
-      console.log('✅ Using algosdk.Transaction constructor');
       txnInstance = new algosdk.Transaction(txnObj);
     }
     else {
       throw new Error("Unable to construct Transaction: algosdk API shape not recognized. Check your algosdk version.");
     }
-    console.log('✅ Transaction instance created');
 
     // ---- get canonical bytes to sign ----
-    console.log('📝 Getting bytes to sign...');
     if (typeof txnInstance.bytesToSign !== "function") {
       throw new Error("Transaction instance does not have bytesToSign(); incompatible algosdk API.");
     }
     const bytesToSign = txnInstance.bytesToSign(); // Uint8Array
-    console.log('📋 Bytes to sign length:', bytesToSign.length);
 
     // ---- call Vault (Transit sign) ----
-    console.log('🔐 Calling Vault to sign...');
     const payload = { input: Buffer.from(bytesToSign).toString("base64") };
     const signUrl = `${VAULT_ADDR}/v1/transit/sign/algo-user-${user.uid}`;
-    console.log('📡 Vault sign request:', { url: signUrl, payloadLength: payload.input.length });
     
     const response = await axios.post(signUrl, payload, { headers: { "X-Vault-Token": VAULT_TOKEN } });
-    console.log('📋 Vault sign response:', response.data);
 
     const vaultSig = response.data?.data?.signature;
-    console.log('🔏 Vault signature:', vaultSig);
     if (!vaultSig) throw new Error("No signature returned from Vault");
 
     // vault returns "vault:v1:<BASE64>" — keep last section
     const sigBase64 = vaultSig.split(":").pop();
-    console.log('📋 Signature base64 length:', sigBase64.length);
     const sigBytes = Buffer.from(sigBase64, "base64"); // Node Buffer (Uint8Array-compatible)
-    console.log('📋 Signature bytes length:', sigBytes.length);
 
     // ---- attach signature ----
     if (typeof txnInstance.attachSignature === "function") {
@@ -330,15 +279,12 @@ app.post("/sign", async (req, res) => {
       }
 
       // submit the signed bytes to algod
-      console.log('📤 Submitting to Algorand network...');
       const txnResult = await algodClient.sendRawTransaction(signedTxnBytes).do();
-      console.log('✅ Transaction submitted:', txnResult);
 
       const result = {
         txId: txnResult.txId,
         signedBytesBase64: Buffer.from(signedTxnBytes).toString("base64"),
       };
-      console.log('✅ /sign success response:', result);
       res.json(result);
       return;
     } else if (typeof algosdk.encodeObj === "function") {
@@ -356,12 +302,6 @@ app.post("/sign", async (req, res) => {
       throw new Error("No method available to attach signature (attachSignature or algosdk.encodeObj missing).");
     }
   } catch (err) {
-    console.error("❌ Signing failed:", {
-      message: err.message,
-      status: err.response?.status,
-      data: err.response?.data,
-      stack: err.stack
-    });
     res.status(500).json({ error: "Signing failed", details: (err.response?.data || err.message || err).toString() });
   }
 });
@@ -435,7 +375,7 @@ app.post("/sign-txn", async (req, res) => {
     });
     
     // Verify user
-    const user = await verifyOAuthToken(oauthToken);
+    const user = await verifyOAuthToken(oauthToken, true);
     if (!user) return res.status(401).json({ error: "Invalid oauth token" });
 
     const userId = user.uid;
@@ -496,39 +436,24 @@ app.post("/sign-txn", async (req, res) => {
 });
 // Get wallet address endpoint
 app.get("/get/:id", async (req, res) => {
-  console.log('🚀 /get/:id endpoint called');
   const { id } = req.params;
-  console.log('📋 Get address request for user ID:', id);
   
   try {
     const keyUrl = `${VAULT_ADDR}/v1/transit/keys/algo-user-${id}`;
-    console.log('📡 Vault key request:', keyUrl);
     
     const response = await axios.get(keyUrl, {
       headers: { "X-Vault-Token": VAULT_ADMIN_TOKEN },
     });
-    console.log('📋 Vault key response:', response.data);
 
     const pubB64 = response.data.data.keys["1"].public_key;
-    console.log('🔑 Public key base64:', pubB64);
     
     const pubBytes = new Uint8Array(Buffer.from(pubB64, "base64"));
-    console.log('📋 Public key bytes length:', pubBytes.length);
     
     const walletAddress = algosdk.encodeAddress(pubBytes);
-    console.log('🏠 Wallet address:', walletAddress);
     
     const result = { walletAddress };
-    console.log('✅ /get success response:', result);
     res.json(result);
   } catch (err) {
-    console.error("❌ Get address error:", {
-      message: err.message,
-      status: err.response?.status,
-      data: err.response?.data,
-      stack: err.stack
-    });
-    
     if (err.response?.status === 404) {
       res.status(404).json({ 
         error: "Key not found", 
@@ -555,4 +480,5 @@ app.listen(3000, () => {
   console.log('  GET /get/:id - Get wallet address');
   console.log('  GET /mock - Mock transaction test');
   console.log('  GET / - Health check');
+  console.log('\n🔍 Only /sign-txn logs will be shown');
 });
