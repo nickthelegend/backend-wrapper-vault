@@ -144,7 +144,7 @@ app.post("/sign", async (req, res) => {
 app.get("/mock", async (req, res) => {
   try {
     const senderAddr = "DKD6JIA5CCTKRZJJJ25EO5GT6KMFDZYTCVCAKDEWBZYQOEU6T2UXXTIBAM";
-    const receiverAddr = "DKD6JIA5CCTKRZJJJ25EO5GT6KMFDZYTCVCAKDEWBZYQOEU6T2UXXTIBAM"; // test receiver
+    const receiverAddr = "JQ4DXV6ZXEQJRPRRFQDLR5WWD7WUPAELJNKP6FVSAQ4ZJNRHGBYJCKDHOY"; // test receiver
     const userId = "123"; // mock user ID for Vault key: algo-user-123
 
     // 1️⃣ Get transaction params from network
